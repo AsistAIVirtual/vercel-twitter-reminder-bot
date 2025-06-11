@@ -1,0 +1,7 @@
+{
+  "name": "vercel-twitter-reminder-bot",
+  "type": "module",
+  "dependencies": {
+    "twitter-api-v2": "^1.18.0"
+  }
+}
