@@ -1,8 +1,3 @@
 {
-  "cron": [
-    {
-      "path": "/api/reminder-tweet-scheduler",
-      "schedule": "0 10 * * *"
-    }
-  ]
+  "version": 2
 }
