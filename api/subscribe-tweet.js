@@ -1,5 +1,11 @@
 import { TwitterApi } from 'twitter-api-v2';
 
+console.log("🟡 DEBUG - Twitter API ENV Values:");
+console.log("TWITTER_API_KEY:", process.env.TWITTER_API_KEY);
+console.log("TWITTER_API_SECRET:", process.env.TWITTER_API_SECRET);
+console.log("TWITTER_ACCESS_TOKEN:", process.env.TWITTER_ACCESS_TOKEN);
+console.log("TWITTER_ACCESS_SECRET:", process.env.TWITTER_ACCESS_SECRET);
+
 const client = new TwitterApi({
   appKey: process.env.TWITTER_API_KEY,
   appSecret: process.env.TWITTER_API_SECRET,
@@ -34,6 +40,6 @@ export default async function handler(req, res) {
     res.status(200).json({ success: true, tweet });
   } catch (err) {
     console.error('Tweet error:', err);
-    res.status(500).json({ error: 'Failed to send tweet' });
+    res.status(500).json({ error: 'Failed to send tweet', debug: err });
   }
 }
