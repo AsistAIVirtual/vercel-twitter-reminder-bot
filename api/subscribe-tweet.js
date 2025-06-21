@@ -1,22 +1,18 @@
 import { TwitterApi } from 'twitter-api-v2';
-import { kv } from '@vercel/kv';
 import { v4 as uuidv4 } from 'uuid';
 
-console.log("🟡 DEBUG - Twitter API ENV Values:");
-console.log("TWITTER_API_KEY:", process.env.TWITTER_API_KEY);
-console.log("TWITTER_API_SECRET:", process.env.TWITTER_API_SECRET);
-console.log("TWITTER_ACCESS_TOKEN:", process.env.TWITTER_ACCESS_TOKEN);
-console.log("TWITTER_ACCESS_SECRET:", process.env.TWITTER_ACCESS_SECRET);
+const KV_REST_API_URL = process.env.KV_REST_API_URL;
+const KV_REST_API_TOKEN = process.env.KV_REST_API_TOKEN;
 
 const client = new TwitterApi({
   appKey: process.env.TWITTER_API_KEY,
-  appSecret: process.env.TWITTER_API_SECRET,
+  appSecret: process.env.TWITTER_API_KEY_SECRET,
   accessToken: process.env.TWITTER_ACCESS_TOKEN,
-  accessSecret: process.env.TWITTER_ACCESS_SECRET,
+  accessSecret: process.env.TWITTER_ACCESS_TOKEN_SECRET,
 });
 
 export default async function handler(req, res) {
-  // 🔥 CORS headers
+  // ✅ CORS ayarları
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -42,17 +38,27 @@ export default async function handler(req, res) {
 
     const reminderDate = new Date();
     reminderDate.setDate(reminderDate.getDate() + parseInt(days));
+
     const reminder = {
       twitterUsername,
       tokenName,
       remindInDays: days,
       remindDate: reminderDate.toISOString()
     };
-    await kv.set(`reminder:${uuidv4()}`, reminder);
+
+    await fetch(`${KV_REST_API_URL}/set/reminder:${uuidv4()}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${KV_REST_API_TOKEN}`,
+        "Content-Type": "application/json",
+        Accept: "application/json"
+      },
+      body: JSON.stringify(reminder)
+    });
 
     res.status(200).json({ success: true, tweet });
   } catch (err) {
     console.error('Tweet error:', err);
-    res.status(500).json({ error: 'Failed to send tweet', debug: err });
+    res.status(500).json({ error: 'Failed to send tweet', debug: err.message });
   }
 }
