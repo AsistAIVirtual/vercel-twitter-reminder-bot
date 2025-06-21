@@ -1,43 +1,77 @@
-// reminder-tweet-scheduler.js
-import { kv } from '@vercel/kv';
+
 import { TwitterApi } from 'twitter-api-v2';
 
 const client = new TwitterApi({
   appKey: process.env.TWITTER_API_KEY,
-  appSecret: process.env.TWITTER_API_SECRET,
+  appSecret: process.env.TWITTER_API_KEY_SECRET,
   accessToken: process.env.TWITTER_ACCESS_TOKEN,
-  accessSecret: process.env.TWITTER_ACCESS_SECRET,
+  accessSecret: process.env.TWITTER_ACCESS_TOKEN_SECRET,
 });
 
-const twitter = client.readWrite;
+const KV_REST_API_URL = process.env.KV_REST_API_URL;
+const KV_REST_API_TOKEN = process.env.KV_REST_API_TOKEN;
 
 export default async function handler(req, res) {
-  if (req.method !== 'GET') {
-    return res.status(405).json({ error: 'Only GET requests allowed' });
-  }
-
   try {
-    const reminders = await kv.hgetall('reminders');
-    if (!reminders || Object.keys(reminders).length === 0) {
-      return res.status(200).json({ message: 'No reminders to send' });
+    const now = new Date().toISOString().slice(0, 10);
+    console.log("⏰ Reminder check started for date:", now);
+
+    const keyListRes = await fetch(`${KV_REST_API_URL}/keys/reminder:*`, {
+      headers: {
+        Authorization: `Bearer ${KV_REST_API_TOKEN}`,
+        Accept: "application/json"
+      }
+    });
+
+    const keyList = await keyListRes.json();
+    console.log("Fetched keys:", keyList);
+
+    if (!keyList.result || !Array.isArray(keyList.result)) {
+      return res.status(500).json({ error: "Upstash keys not accessible", keyList });
     }
 
-    const now = new Date();
-    const today = now.toISOString().split('T')[0];
+    let remindersSent = 0;
 
-    for (const [key, data] of Object.entries(reminders)) {
-      const reminder = JSON.parse(data);
-      if (reminder.date === today) {
-        await twitter.v2.tweet(
-          `Hey @${reminder.username}, your reminder for ${reminder.token} is due today! The token unlock is approaching!`
-        );
-        await kv.hdel('reminders', key);
+    for (const key of keyList.result) {
+      console.log("🔍 Checking key:", key);
+      const reminderRes = await fetch(`${KV_REST_API_URL}/get/${key}`, {
+        headers: {
+          Authorization: `Bearer ${KV_REST_API_TOKEN}`,
+          Accept: "application/json"
+        }
+      });
+
+      const reminderData = await reminderRes.json();
+      if (!reminderData || !reminderData.result || !reminderData.result.remindDate) continue;
+
+      const reminder = reminderData.result;
+      const reminderDate = reminder.remindDate.slice(0, 10);
+
+      if (reminderDate === now) {
+        const tweet = `@${reminder.twitterUsername} Reminder: Token ${reminder.tokenName} will unlock in ${reminder.remindInDays} days!`;
+        try {
+          await client.v2.tweet(tweet);
+          console.log("✅ Tweet sent to:", reminder.twitterUsername);
+
+          await fetch(`${KV_REST_API_URL}/del/${key}`, {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${KV_REST_API_TOKEN}`,
+              Accept: "application/json"
+            }
+          });
+
+          remindersSent++;
+        } catch (err) {
+          console.error('🚨 Tweet error:', err);
+        }
       }
     }
 
-    return res.status(200).json({ message: 'Reminders processed.' });
+    res.status(200).json({ success: true, remindersSent });
+
   } catch (err) {
-    console.error(err);
-    return res.status(500).json({ error: 'Failed to send reminders.' });
+    console.error("🔥 Scheduler crash:", err);
+    res.status(500).json({ error: "Unhandled error", details: err.message || err.toString() });
   }
 }

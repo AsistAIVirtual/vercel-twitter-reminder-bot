@@ -1,4 +1,12 @@
 import { TwitterApi } from 'twitter-api-v2';
+import { kv } from '@vercel/kv';
+import { v4 as uuidv4 } from 'uuid';
+
+console.log("🟡 DEBUG - Twitter API ENV Values:");
+console.log("TWITTER_API_KEY:", process.env.TWITTER_API_KEY);
+console.log("TWITTER_API_SECRET:", process.env.TWITTER_API_SECRET);
+console.log("TWITTER_ACCESS_TOKEN:", process.env.TWITTER_ACCESS_TOKEN);
+console.log("TWITTER_ACCESS_SECRET:", process.env.TWITTER_ACCESS_SECRET);
 
 const client = new TwitterApi({
   appKey: process.env.TWITTER_API_KEY,
@@ -31,9 +39,20 @@ export default async function handler(req, res) {
 
   try {
     await client.v2.tweet(tweet);
+
+    const reminderDate = new Date();
+    reminderDate.setDate(reminderDate.getDate() + parseInt(days));
+    const reminder = {
+      twitterUsername,
+      tokenName,
+      remindInDays: days,
+      remindDate: reminderDate.toISOString()
+    };
+    await kv.set(`reminder:${uuidv4()}`, reminder);
+
     res.status(200).json({ success: true, tweet });
   } catch (err) {
     console.error('Tweet error:', err);
-    res.status(500).json({ error: 'Failed to send tweet' });
+    res.status(500).json({ error: 'Failed to send tweet', debug: err });
   }
 }
