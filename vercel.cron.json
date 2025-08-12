@@ -1,7 +1,0 @@
-[
-  {
-    "path": "/api/reminder-tweet-scheduler",
-    "schedule": "0 9 * * *",
-    "timezone": "UTC"
-  }
-]
