@@ -1,10 +1,9 @@
-// /api/reminder-tweet-scheduler.js
+// pages/api/reminder-tweet-scheduler.js
 import { TwitterApi } from 'twitter-api-v2';
 
 const KV_URL   = process.env.KV_REST_API_URL;
 const KV_TOKEN = process.env.KV_REST_API_TOKEN;
 
-/* -------------------- helpers -------------------- */
 function cors(res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
@@ -21,19 +20,13 @@ function upstash(path, init = {}) {
   });
 }
 
-// Upstash GET çıktısını ne gelirse gelsin objeye çevirir:
-// A) { result:{value:{...}} }  B) { result:{...} }
-// C) { result:"{...json...}" }  D) { result:{value:"{...json...}"} }
+// GET çıktısını objeye çevirir (A/B/C/D varyasyonları)
 function extractReminder(getJson) {
   let raw = getJson?.result;
-  if (typeof raw === 'string') {
-    try { raw = JSON.parse(raw); } catch (_) {}
-  }
-  let reminder = raw?.value ?? raw;
-  if (typeof reminder === 'string') {
-    try { reminder = JSON.parse(reminder); } catch (_) {}
-  }
-  return typeof reminder === 'object' && reminder ? reminder : null;
+  if (typeof raw === 'string') { try { raw = JSON.parse(raw); } catch {} }
+  let val = raw?.value ?? raw;
+  if (typeof val === 'string') { try { val = JSON.parse(val); } catch {} }
+  return val && typeof val === 'object' ? val : null;
 }
 
 function toMs(dueAtRaw) {
@@ -42,7 +35,6 @@ function toMs(dueAtRaw) {
   return Number.isFinite(t) ? t : NaN;
 }
 
-/* -------------------- handler -------------------- */
 export default async function handler(req, res) {
   cors(res);
   if (req.method === 'OPTIONS') return res.status(200).end();
@@ -74,18 +66,16 @@ export default async function handler(req, res) {
       accessToken:  process.env.TWITTER_ACCESS_TOKEN,
       accessSecret: process.env.TWITTER_ACCESS_TOKEN_SECRET,
     });
-  } catch (_) {
-    // tweet atamasak da taramayı yapacağız
-  }
+  } catch (_) {}
 
   try {
-    // 1) reminder:* anahtarlarını çek
+    // 1) reminder:* keys
     const keysRes = await upstash(`/keys/reminder:*`);
     const keysJson = await keysRes.json().catch(() => null);
     const keys = Array.isArray(keysJson?.result) ? keysJson.result : [];
     stats.keysFetched = keys.length;
 
-    // 2) Her anahtarı işle
+    // 2) loop
     for (const key of keys) {
       try {
         const gRes = await upstash(`/get/${encodeURIComponent(key)}`);
@@ -100,7 +90,7 @@ export default async function handler(req, res) {
         const dueAtMs = toMs(reminder.dueAt || reminder.remindDate);
         if (!Number.isFinite(dueAtMs)) { stats.parseErrors++; failures.push({ key, stage:'parse', msg:'bad dueAt' }); continue; }
 
-        if (sent) { stats.skippedSent++; continue; }
+        if (sent)       { stats.skippedSent++;   continue; }
         if (dueAtMs > now) { stats.skippedFuture++; continue; }
 
         stats.dueNow++;
