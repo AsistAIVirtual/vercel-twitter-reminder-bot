@@ -49,7 +49,7 @@ export default async function handler(req, res) {
     const slots = Number(stakeAmount || 0) >= 100000 ? 3 : 1;
     const text =
       `Hey @${twitterUsername}, your reminder has been recorded.\n` +
-      `You'll be notified in ${remindInDays} days before the unlock of token $${token}. (Slots: ${slots})`;
+      `You'll be notified in ${remindInDays} days before the unlock of token ${token}. (Slots: ${slots})`;
 
     // tweet at
     const client = new TwitterApi({
