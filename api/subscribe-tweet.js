@@ -1,9 +1,9 @@
-// /api/subscribe-tweet.js
+// pages/api/subscribe-tweet.js
 import { TwitterApi } from 'twitter-api-v2';
 
 /* ------------ CORS ------------ */
 function cors(res) {
-  // If you serve from both www and apex, you can use '*' during testing
+  // production'da istersen domainlerini yaz: https://virgenscan.org, https://www.virgenscan.org
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
@@ -24,22 +24,16 @@ function upstash(path, init = {}) {
   });
 }
 
-// Upstash GET result normalizer:
-// A) { result:{value:{...}} }  B) { result:{...} }
-// C) { result:"{...json...}" } D) { result:{value:"{...json...}"} }
+// Upstash GET normalizer (objeyi her durumda döndürür)
 async function kvGetObj(key) {
   const r = await upstash(`/get/${encodeURIComponent(key)}`);
   if (!r.ok) return null;
   const j = await r.json().catch(() => null);
   let raw = j?.result;
-  if (typeof raw === 'string') {
-    try { raw = JSON.parse(raw); } catch {}
-  }
+  if (typeof raw === 'string') { try { raw = JSON.parse(raw); } catch {} }
   let val = raw?.value ?? raw;
-  if (typeof val === 'string') {
-    try { val = JSON.parse(val); } catch {}
-  }
-  return (val && typeof val === 'object') ? val : null;
+  if (typeof val === 'string') { try { val = JSON.parse(val); } catch {} }
+  return val && typeof val === 'object' ? val : null;
 }
 
 async function kvSetObj(key, value) {
@@ -103,14 +97,12 @@ export default async function handler(req, res) {
     // Rights by stake: <100k => 1, >=100k => 3
     const rights = stake >= 100000 ? 3 : 1;
 
-    // ---- LIMIT CHECK (count unsent reminders for this wallet) ----
-    // We look up keys like "reminder:<wallet>:*"
+    // ---- LIMIT CHECK ---- (count unsent reminders for this wallet)
     const listRes = await upstash(`/keys/reminder:${wallet}:*`);
     const listJson = await listRes.json().catch(() => null);
     const keys = Array.isArray(listJson?.result) ? listJson.result : [];
 
     let activeCount = 0;
-    // Iterate and count only unsent ones
     for (const k of keys) {
       const obj = await kvGetObj(k);
       if (obj && obj.wallet === wallet && obj.sent !== true) activeCount++;
@@ -156,7 +148,6 @@ export default async function handler(req, res) {
         tweeted = tw?.data?.id || null;
       }
     } catch (e) {
-      // Keep success: the reminder has been stored successfully.
       console.warn('tweet confirm failed:', e?.data?.errors?.[0]?.message || e?.message || String(e));
     }
 
