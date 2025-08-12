@@ -11,6 +11,6 @@
     }
   ],
   "crons": [
-    { "path": "/api/reminder-tweet-scheduler", "schedule": "*/10 * * * *", "timezone": "UTC" }
+    { "path": "/api/reminder-tweet-scheduler", "schedule": "0 9 * * *", "timezone": "UTC" }
   ]
 }
