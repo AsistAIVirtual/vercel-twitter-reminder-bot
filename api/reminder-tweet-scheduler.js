@@ -1,4 +1,3 @@
-
 import { TwitterApi } from 'twitter-api-v2';
 
 const client = new TwitterApi({
@@ -11,67 +10,86 @@ const client = new TwitterApi({
 const KV_REST_API_URL = process.env.KV_REST_API_URL;
 const KV_REST_API_TOKEN = process.env.KV_REST_API_TOKEN;
 
+async function kvJson(url, init = {}) {
+  const res = await fetch(url, {
+    ...init,
+    headers: {
+      Authorization: `Bearer ${KV_REST_API_TOKEN}`,
+      Accept: 'application/json',
+      ...(init.headers || {}),
+    },
+  });
+  const json = await res.json().catch(() => null);
+  return { ok: res.ok, json };
+}
+
 export default async function handler(req, res) {
+  if (req.method === 'OPTIONS') return res.status(200).end();
+  if (req.method !== 'GET') return res.status(405).json({ ok: false, error: 'Method Not Allowed' });
+
   try {
-    const now = new Date().toISOString().slice(0, 10);
-    console.log("⏰ Reminder check started for date:", now);
+    const now = new Date();
 
-    const keyListRes = await fetch(`${KV_REST_API_URL}/keys/reminder:*`, {
-      headers: {
-        Authorization: `Bearer ${KV_REST_API_TOKEN}`,
-        Accept: "application/json"
-      }
-    });
-
-    const keyList = await keyListRes.json();
-    console.log("Fetched keys:", keyList);
-
-    if (!keyList.result || !Array.isArray(keyList.result)) {
-      return res.status(500).json({ error: "Upstash keys not accessible", keyList });
+    // 1) reminder:* anahtarlarını al
+    const { ok: keysOk, json: keysJson } = await kvJson(`${KV_REST_API_URL}/keys/reminder:*`);
+    if (!keysOk || !Array.isArray(keysJson?.result)) {
+      return res.status(200).json({ ok: true, processed: 0, note: 'no keys' });
     }
 
-    let remindersSent = 0;
+    let processed = 0;
 
-    for (const key of keyList.result) {
-      console.log("🔍 Checking key:", key);
-      const reminderRes = await fetch(`${KV_REST_API_URL}/get/${key}`, {
-        headers: {
-          Authorization: `Bearer ${KV_REST_API_TOKEN}`,
-          Accept: "application/json"
-        }
-      });
+    for (const key of keysJson.result) {
+      // 2) reminder objesini çek
+      const { ok: getOk, json: getJson } = await kvJson(`${KV_REST_API_URL}/get/${encodeURIComponent(key)}`);
+      if (!getOk) continue;
 
-      const reminderData = await reminderRes.json();
-      if (!reminderData || !reminderData.result || !reminderData.result.remindDate) continue;
+      // Upstash GET formatı: { result: { value: {...} } }  (bazı eski kayıtlarda {result:{...}} olabilir)
+      const reminder = getJson?.result?.value ?? getJson?.result;
+      if (!reminder) continue;
 
-      const reminder = reminderData.result;
-      const reminderDate = reminder.remindDate.slice(0, 10);
+      // 3) dueAt (yeni) ya da remindDate (eski) alanını oku
+      const dueStr = reminder.dueAt || reminder.remindDate; // ISO string bekliyoruz
+      if (!dueStr) continue;
 
-      if (reminderDate === now) {
-        const tweet = `@${reminder.twitterUsername} Reminder: Token ${reminder.tokenName} will unlock in ${reminder.remindInDays} days!`;
-        try {
-          await client.v2.tweet(tweet);
-          console.log("✅ Tweet sent to:", reminder.twitterUsername);
+      const dueAt = new Date(dueStr);
+      if (isNaN(dueAt.getTime())) continue;
+      if (reminder.sent) continue;                 // zaten gönderilmişse geç
+      if (dueAt.getTime() > now.getTime()) continue; // zamanı gelmemişse geç
 
-          await fetch(`${KV_REST_API_URL}/del/${key}`, {
-            method: 'POST',
-            headers: {
-              Authorization: `Bearer ${KV_REST_API_TOKEN}`,
-              Accept: "application/json"
-            }
-          });
+      // 4) tweet metni
+      const uname = String(reminder.twitterUsername || '').replace(/^@/, '');
+      const token = reminder.token || reminder.tokenName || 'TOKEN';
+      const days  = reminder.remindInDays ?? '?';
 
-          remindersSent++;
-        } catch (err) {
-          console.error('🚨 Tweet error:', err);
-        }
+      const text =
+        `Hey @${uname}, reminder time!\n` +
+        `${days} days before unlock for ${token}.`;
+
+      try {
+        await client.v2.tweet(text);
+
+        // 5) sent=true işaretle (ya da istersen tamamen sil)
+        reminder.sent = true;
+        await fetch(`${KV_REST_API_URL}/set/${encodeURIComponent(key)}`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${KV_REST_API_TOKEN}`,
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+          },
+          body: JSON.stringify({ value: reminder }),
+        });
+
+        processed++;
+      } catch (e) {
+        // yazma izni vb. sorunlarda düşmesin
+        console.error('tweet fail:', key, e?.message || e);
       }
     }
 
-    res.status(200).json({ success: true, remindersSent });
-
-  } catch (err) {
-    console.error("🔥 Scheduler crash:", err);
-    res.status(500).json({ error: "Unhandled error", details: err.message || err.toString() });
+    return res.status(200).json({ ok: true, processed });
+  } catch (e) {
+    console.error('scheduler crash:', e);
+    return res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 }
