@@ -4,34 +4,55 @@ import { TwitterApi } from 'twitter-api-v2';
 const KV_URL   = process.env.KV_REST_API_URL;
 const KV_TOKEN = process.env.KV_REST_API_TOKEN;
 
-function upstash(path, init={}) {
+/* -------------------- helpers -------------------- */
+function cors(res) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+}
+function upstash(path, init = {}) {
   return fetch(`${KV_URL}${path}`, {
     ...init,
     headers: {
       Authorization: `Bearer ${KV_TOKEN}`,
       Accept: 'application/json',
-      ...(init.headers||{}),
+      ...(init.headers || {}),
     },
   });
 }
 
-// CORS (isteğe bağlı)
-function cors(res){
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+// Upstash GET çıktısını ne gelirse gelsin objeye çevirir:
+// A) { result:{value:{...}} }  B) { result:{...} }
+// C) { result:"{...json...}" }  D) { result:{value:"{...json...}"} }
+function extractReminder(getJson) {
+  let raw = getJson?.result;
+  if (typeof raw === 'string') {
+    try { raw = JSON.parse(raw); } catch (_) {}
+  }
+  let reminder = raw?.value ?? raw;
+  if (typeof reminder === 'string') {
+    try { reminder = JSON.parse(reminder); } catch (_) {}
+  }
+  return typeof reminder === 'object' && reminder ? reminder : null;
 }
 
+function toMs(dueAtRaw) {
+  if (typeof dueAtRaw === 'number') return dueAtRaw;
+  const t = new Date(dueAtRaw).getTime();
+  return Number.isFinite(t) ? t : NaN;
+}
+
+/* -------------------- handler -------------------- */
 export default async function handler(req, res) {
   cors(res);
   if (req.method === 'OPTIONS') return res.status(200).end();
-  if (req.method !== 'GET') return res.status(405).json({ ok:false, error:'Method Not Allowed' });
+  if (req.method !== 'GET') return res.status(405).json({ ok: false, error: 'Method Not Allowed' });
 
   if (!KV_URL || !KV_TOKEN) {
-    return res.status(500).json({ ok:false, error:'Missing Upstash envs' });
+    return res.status(500).json({ ok: false, error: 'Missing Upstash envs' });
   }
 
-  const now = new Date();
+  const now = Date.now();
   const stats = {
     keysFetched: 0,
     itemsLoaded: 0,
@@ -48,18 +69,17 @@ export default async function handler(req, res) {
   let tw = null;
   try {
     tw = new TwitterApi({
-      appKey: process.env.TWITTER_API_KEY,
+      appKey:    process.env.TWITTER_API_KEY,
       appSecret: process.env.TWITTER_API_KEY_SECRET,
-      accessToken: process.env.TWITTER_ACCESS_TOKEN,
+      accessToken:  process.env.TWITTER_ACCESS_TOKEN,
       accessSecret: process.env.TWITTER_ACCESS_TOKEN_SECRET,
     });
-  } catch(e){
-    // tweet atamazsak da taramayı yapalım
+  } catch (_) {
+    // tweet atamasak da taramayı yapacağız
   }
 
   try {
-    // 1) Tüm reminder anahtarlarını çek
-    // Not: Upstash’ta doğru yol /keys/<pattern>
+    // 1) reminder:* anahtarlarını çek
     const keysRes = await upstash(`/keys/reminder:*`);
     const keysJson = await keysRes.json().catch(() => null);
     const keys = Array.isArray(keysJson?.result) ? keysJson.result : [];
@@ -69,35 +89,22 @@ export default async function handler(req, res) {
     for (const key of keys) {
       try {
         const gRes = await upstash(`/get/${encodeURIComponent(key)}`);
-        if (!gRes.ok) { stats.getErrors++; failures.push({ key, stage:'kv:get', status:gRes.status }); continue; }
+        if (!gRes.ok) { stats.getErrors++; failures.push({ key, stage: 'kv:get', status: gRes.status }); continue; }
+
         const gJson = await gRes.json().catch(() => (stats.parseErrors++, null));
-        // Upstash iki şekilde dönebilir:
-        // A) { result: { value: {...} } }
-        // B) { result: {...} }
-        const reminder = gJson?.result?.value ?? gJson?.result;
-        if (!reminder || typeof reminder !== 'object') {
-          stats.parseErrors++; failures.push({ key, stage:'parse', msg:'no reminder' }); continue;
-        }
+        const reminder = extractReminder(gJson);
+        if (!reminder) { stats.parseErrors++; failures.push({ key, stage: 'parse', msg: 'no reminder' }); continue; }
         stats.itemsLoaded++;
 
-        // dueAt’i oku (ISO string ya da timestamp olabilir)
-        let dueAtRaw = reminder.dueAt || reminder.remindDate; // backward-compat
-        if (!dueAtRaw) { stats.parseErrors++; failures.push({ key, stage:'parse', msg:'no dueAt' }); continue; }
-
-        const dueAtMs = typeof dueAtRaw === 'number'
-          ? dueAtRaw
-          : new Date(dueAtRaw).getTime();
-
-        if (!Number.isFinite(dueAtMs)) { stats.parseErrors++; failures.push({ key, stage:'parse', msg:'bad dueAt', val: dueAtRaw }); continue; }
-
         const sent = !!reminder.sent;
+        const dueAtMs = toMs(reminder.dueAt || reminder.remindDate);
+        if (!Number.isFinite(dueAtMs)) { stats.parseErrors++; failures.push({ key, stage:'parse', msg:'bad dueAt' }); continue; }
 
         if (sent) { stats.skippedSent++; continue; }
-        if (dueAtMs > now.getTime()) { stats.skippedFuture++; continue; }
+        if (dueAtMs > now) { stats.skippedFuture++; continue; }
 
         stats.dueNow++;
 
-        // Tweet at
         if (!tw) { failures.push({ key, stage:'tweet', msg:'twitter client not ready' }); continue; }
 
         const uname = String(reminder.twitterUsername || '').replace(/^@/,'');
@@ -110,24 +117,32 @@ export default async function handler(req, res) {
 
         try {
           await tw.v2.tweet(text);
+
           // sent:true yaz
-          reminder.sent = true;
+          const updated = { ...reminder, sent: true };
           await upstash(`/set/${encodeURIComponent(key)}`, {
-            method:'POST',
-            headers:{ 'Content-Type':'application/json' },
-            body: JSON.stringify({ value: reminder }),
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ value: updated }),
           });
+
           stats.tweeted++;
-        } catch(e) {
+        } catch (e) {
           failures.push({ key, stage:'tweet', msg: e?.data?.errors?.[0]?.message || e?.message || String(e) });
         }
-      } catch(e){
+      } catch (e) {
         failures.push({ key, stage:'loop', msg: e?.message || String(e) });
       }
     }
 
-    return res.status(200).json({ ok:true, processed: stats.tweeted, tweeted: stats.tweeted, stats, failures });
+    return res.status(200).json({
+      ok: true,
+      processed: stats.tweeted,
+      tweeted: stats.tweeted,
+      stats,
+      failures,
+    });
   } catch (e) {
-    return res.status(500).json({ ok:false, error: e?.message || String(e) });
+    return res.status(500).json({ ok: false, error: e?.message || String(e) });
   }
 }
