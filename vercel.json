@@ -9,5 +9,8 @@
         { "key": "Access-Control-Max-Age", "value": "86400" }
       ]
     }
+  ],
+  "crons": [
+    { "path": "/api/reminder-tweet-scheduler", "schedule": "*/10 * * * *", "timezone": "UTC" }
   ]
 }
