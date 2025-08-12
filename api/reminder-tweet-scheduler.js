@@ -1,17 +1,10 @@
 import { TwitterApi } from 'twitter-api-v2';
 
-const client = new TwitterApi({
-  appKey: process.env.TWITTER_API_KEY,
-  appSecret: process.env.TWITTER_API_KEY_SECRET,
-  accessToken: process.env.TWITTER_ACCESS_TOKEN,
-  accessSecret: process.env.TWITTER_ACCESS_TOKEN_SECRET,
-});
-
-const KV_REST_API_URL = process.env.KV_REST_API_URL;
+const KV_REST_API_URL   = process.env.KV_REST_API_URL;
 const KV_REST_API_TOKEN = process.env.KV_REST_API_TOKEN;
 
-async function kvJson(url, init = {}) {
-  const res = await fetch(url, {
+function upstash(url, init = {}) {
+  return fetch(url, {
     ...init,
     headers: {
       Authorization: `Bearer ${KV_REST_API_TOKEN}`,
@@ -19,77 +12,138 @@ async function kvJson(url, init = {}) {
       ...(init.headers || {}),
     },
   });
-  const json = await res.json().catch(() => null);
-  return { ok: res.ok, json };
 }
 
 export default async function handler(req, res) {
+  // CORS
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   if (req.method === 'OPTIONS') return res.status(200).end();
-  if (req.method !== 'GET') return res.status(405).json({ ok: false, error: 'Method Not Allowed' });
+  if (req.method !== 'GET')   return res.status(405).json({ ok: false, error: 'Method Not Allowed' });
+
+  const startedAt = new Date();
+  const now = new Date();
+
+  const stats = {
+    keysFetched: 0,
+    itemsLoaded: 0,
+    dueNow: 0,
+    tweeted: 0,
+    skippedSent: 0,
+    skippedFuture: 0,
+    parseErrors: 0,
+    getErrors: 0,
+  };
+  const failures = [];
 
   try {
-    const now = new Date();
-
-    // 1) reminder:* anahtarlarını al
-    const { ok: keysOk, json: keysJson } = await kvJson(`${KV_REST_API_URL}/keys/reminder:*`);
-    if (!keysOk || !Array.isArray(keysJson?.result)) {
-      return res.status(200).json({ ok: true, processed: 0, note: 'no keys' });
+    if (!KV_REST_API_URL || !KV_REST_API_TOKEN) {
+      console.error('ENV MISSING', { KV_REST_API_URL: !!KV_REST_API_URL, KV_REST_API_TOKEN: !!KV_REST_API_TOKEN });
+      return res.status(500).json({ ok: false, error: 'Missing Upstash envs' });
     }
 
-    let processed = 0;
+    // 1) reminder:* anahtarlarını çek
+    const keysRes = await upstash(`${KV_REST_API_URL}/keys/reminder:*`);
+    const keysJson = await keysRes.json().catch(() => null);
+    const keys = Array.isArray(keysJson?.result) ? keysJson.result : [];
+    stats.keysFetched = keys.length;
+    console.log('[scheduler] keys:', stats.keysFetched);
 
-    for (const key of keysJson.result) {
-      // 2) reminder objesini çek
-      const { ok: getOk, json: getJson } = await kvJson(`${KV_REST_API_URL}/get/${encodeURIComponent(key)}`);
-      if (!getOk) continue;
+    if (!keys.length) {
+      return res.status(200).json({ ok: true, processed: 0, stats, note: 'no reminder keys' });
+    }
 
-      // Upstash GET formatı: { result: { value: {...} } }  (bazı eski kayıtlarda {result:{...}} olabilir)
-      const reminder = getJson?.result?.value ?? getJson?.result;
-      if (!reminder) continue;
+    // 2) Twitter client (varsa)
+    let twitterClient = null;
+    try {
+      twitterClient = new TwitterApi({
+        appKey:        process.env.TWITTER_API_KEY,
+        appSecret:     process.env.TWITTER_API_KEY_SECRET,
+        accessToken:   process.env.TWITTER_ACCESS_TOKEN,
+        accessSecret:  process.env.TWITTER_ACCESS_TOKEN_SECRET,
+      });
+    } catch (e) {
+      console.warn('[scheduler] Twitter client init failed (will still mark due, but cannot tweet):', e?.message || e);
+    }
 
-      // 3) dueAt (yeni) ya da remindDate (eski) alanını oku
-      const dueStr = reminder.dueAt || reminder.remindDate; // ISO string bekliyoruz
-      if (!dueStr) continue;
-
-      const dueAt = new Date(dueStr);
-      if (isNaN(dueAt.getTime())) continue;
-      if (reminder.sent) continue;                 // zaten gönderilmişse geç
-      if (dueAt.getTime() > now.getTime()) continue; // zamanı gelmemişse geç
-
-      // 4) tweet metni
-      const uname = String(reminder.twitterUsername || '').replace(/^@/, '');
-      const token = reminder.token || reminder.tokenName || 'TOKEN';
-      const days  = reminder.remindInDays ?? '?';
-
-      const text =
-        `Hey @${uname}, reminder time!\n` +
-        `${days} days before unlock for ${token}.`;
-
+    // 3) Tüm anahtarları dolaş
+    for (const key of keys) {
       try {
-        await client.v2.tweet(text);
+        const gRes = await upstash(`${KV_REST_API_URL}/get/${encodeURIComponent(key)}`);
+        if (!gRes.ok) {
+          stats.getErrors++;
+          failures.push({ key, stage: 'kv:get', status: gRes.status });
+          continue;
+        }
+        const gJson = await gRes.json().catch(() => (stats.parseErrors++, null));
+        // Upstash GET formatı: { result: { value: {...} } } veya { result: {...} }
+        const reminder = gJson?.result?.value ?? gJson?.result;
+        if (!reminder) { stats.parseErrors++; failures.push({ key, stage: 'parse', msg: 'no reminder' }); continue; }
 
-        // 5) sent=true işaretle (ya da istersen tamamen sil)
-        reminder.sent = true;
-        await fetch(`${KV_REST_API_URL}/set/${encodeURIComponent(key)}`, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${KV_REST_API_TOKEN}`,
-            'Content-Type': 'application/json',
-            Accept: 'application/json',
-          },
-          body: JSON.stringify({ value: reminder }),
-        });
+        stats.itemsLoaded++;
 
-        processed++;
+        // Alanları oku
+        const sent   = !!reminder.sent;
+        const dueStr = reminder.dueAt || reminder.remindDate; // backward-compat
+        if (!dueStr) { failures.push({ key, stage: 'parse', msg: 'no dueAt' }); continue; }
+
+        const dueAt = new Date(dueStr);
+        if (isNaN(dueAt.getTime())) { failures.push({ key, stage: 'parse', msg: 'bad dueAt', dueStr }); continue; }
+
+        console.log('[scheduler] check', { key, sent, dueAt: dueAt.toISOString(), now: now.toISOString() });
+
+        if (sent) { stats.skippedSent++; continue; }
+        if (dueAt.getTime() > now.getTime()) { stats.skippedFuture++; continue; }
+
+        // Zamanı gelmiş
+        stats.dueNow++;
+
+        if (!twitterClient) {
+          // Tweet atamıyorsak bile en azından sent=true işaretlemeyelim; tekrar dener.
+          failures.push({ key, stage: 'tweet', msg: 'twitter client not initialized' });
+          continue;
+        }
+
+        const uname = String(reminder.twitterUsername || '').replace(/^@/, '');
+        const token = reminder.token || reminder.tokenName || 'TOKEN';
+        const days  = reminder.remindInDays ?? '?';
+
+        const text =
+          `Hey @${uname}, reminder time!\n` +
+          `${days} days before unlock for ${token}.`;
+
+        try {
+          await twitterClient.v2.tweet(text);
+          // sent = true
+          reminder.sent = true;
+          await upstash(`${KV_REST_API_URL}/set/${encodeURIComponent(key)}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ value: reminder }),
+          });
+          stats.tweeted++;
+          console.log('[scheduler] tweeted', { key });
+        } catch (e) {
+          failures.push({ key, stage: 'tweet', msg: e?.data?.detail || e?.message || String(e) });
+          console.error('[scheduler] tweet fail', { key, err: e?.message || e });
+        }
       } catch (e) {
-        // yazma izni vb. sorunlarda düşmesin
-        console.error('tweet fail:', key, e?.message || e);
+        failures.push({ key, stage: 'loop', msg: e?.message || String(e) });
+        console.error('[scheduler] loop error', { key, err: e?.message || e });
       }
     }
 
-    return res.status(200).json({ ok: true, processed });
+    const elapsedMs = Date.now() - startedAt.getTime();
+    return res.status(200).json({
+      ok: true,
+      processed: stats.tweeted,
+      stats,
+      failures: failures.slice(0, 10), // ilk 10 hatayı döndür
+      elapsedMs,
+    });
   } catch (e) {
-    console.error('scheduler crash:', e);
-    return res.status(500).json({ ok: false, error: String(e?.message || e) });
+    console.error('[scheduler] crash', e);
+    return res.status(500).json({ ok: false, error: e?.message || String(e) });
   }
 }
